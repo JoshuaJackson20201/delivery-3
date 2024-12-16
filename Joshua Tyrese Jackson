@@ -1,0 +1,165 @@
+import pexpect
+
+# Configuration
+credentials = {
+    "ip": '192.168.56.101',
+    "username": 'prne',
+    "password": 'cisco123!',
+    "enable_password": 'class123!'
+}
+
+syslog_server = '192.168.56.101'
+
+# Ask for connection type
+protocol = input("Enter the connection protocol (ssh/telnet): ").strip().lower()
+
+
+def handle_ssh(session):
+    """Handle SSH connection."""
+    if session.expect(['Password:', 'continue connecting (yes/no)?', pexpect.TIMEOUT, pexpect.EOF]) == 1:
+        session.sendline('yes')
+        session.expect('Password:')  # For first-time SSH connection prompt
+    
+    session.sendline(credentials["password"])
+    if session.expect(['>', '#', pexpect.TIMEOUT, pexpect.EOF]) == 0:
+        session.sendline('enable')
+        if session.expect(['Password:', '#', pexpect.TIMEOUT, pexpect.EOF]) == 0:
+            session.sendline(credentials["enable_password"])
+            session.expect('#')
+    
+    compare_configuration(session)
+    configure_device(session)
+    configure_syslog(session)
+
+def handle_telnet(session):
+    """Handle Telnet connection."""
+    session.expect('Username:')
+    session.sendline(credentials["username"])
+    session.expect('Password:')
+    session.sendline(credentials["password"])
+    
+    if session.expect(['>', '#', pexpect.TIMEOUT, pexpect.EOF]) == 0:
+        session.sendline('enable')
+        if session.expect(['Password:', '#', pexpect.TIMEOUT, pexpect.EOF]) == 0:
+            session.sendline(credentials["enable_password"])
+            session.expect('#')
+
+    compare_configuration(session)
+    configure_device(session)
+    configure_syslog(session)
+
+def compare_configuration(session):
+    """Retrieve and compare device configuration."""
+    session.sendline('show running-config')
+    session.expect('#')
+    config_output = session.before.decode('utf-8')
+     
+    if "service password-encryption" not in config_output:
+        print("Warning: Password-Encryption is not enabled.")
+    if "logging console" not in config_output:
+        print("Warning: Console logging is not enabled.")
+
+def configure_syslog(session):
+    """Configure syslog server on the device for logging."""
+    session.sendline('configure terminal')
+    session.expect('#')
+    session.sendline(f'logging host {syslog_server}')
+    session.expect('#')
+    session.sendline('logging trap information')
+    session.expect('#')
+    session.sendline('end')
+    session.expect('#')
+    print("Syslog configuration applied.")
+
+def configure_device(session):
+    """Configure the device by setting the hostname."""
+    session.sendline('configure terminal')
+    session.expect(r'\(config\)#')
+    session.sendline('hostname R1')
+    session.expect(r'R1\(config\)#')
+    session.sendline('exit')
+    session.sendline('exit')
+    session.close()
+    print_success()
+
+def print_success():
+    """Print a success message."""
+    print('---------------------------------------------')
+    print(f'--- Success! {protocol.upper()} connection established to {credentials["ip"]}')
+    print(f'    Username: {credentials["username"]}')
+    print('---------------------------------------------')
+
+def configure_acls(session):
+    """Configure Access Control Lists on the device."""
+    session.sendline('configure terminal')
+    session.expect(r'\(config\)#')
+
+    # ACL configuration 
+    session.sendline('ip access-list extended BLOCK_HTTP')
+    session.expect(r'\(config-ext-nacl\)#')
+    session.sendline('deny tcp any any eq 80')
+    session.sendline('permit ip any any')
+    session.expect(r'\(config-ext-nacl\)#')
+    session.sendline('exit')
+    session.expect(r'\(config\)#')
+
+    # ACL interface
+    session.sendline('interface GigabitEthernet0/1')
+    session.expect(r'\(config-if\)#')
+    session.sendline('ip access-group BLOCK_HTTP in')
+    session.expect(r'\(config-if\)#')
+    session.sendline('exit')
+    session.expect(r'\(Config\)#')
+    print("ACL configuration applied.")
+
+def configure_ipsec(session):
+    """Configure IPSec on the device."""
+    session.sendline('configure terminal')
+    session.expect(r'\(config\)#')
+
+    # ISAKMP policy
+    session.sendline('crypto isakmp policy 10')
+    session.expect(r'\(config-isakmp\)#')
+    session.sendline('encryption aes')
+    session.sendline('hash sha')
+    session.sendline('authentication pre-share')
+    session.sendline('group 2')
+    session.sendline('exit')
+    session.expect(r'\(config\)#')
+
+    session.sendline('crypto isakmp key cisco123 address 192.168.1.0')
+    session.expect(r'\(config\)#')
+
+    session.sendline('crypto ipsec transform-set TRANS_SET esp-aes esp-sha-hmac')
+    session.expect(r'\(config\)#')
+
+    session.sendline('crypto map CRYPTO_MAP 10 ipsec-isakmp')
+    session.expect(r'\(config\)#')
+    session.sendline('set peer 192.168.1.0')
+    session.sendline('set transform-set TRANS_SET')
+    session.sendline('match address 101')
+    session.sendline('exit')
+    session.expect(r'\(Config\)#')
+    print("IPSec Configuration applied.")
+
+def main():
+    session = None
+    if protocol == 'ssh':
+        session = pexpect.spawn(f"ssh {credentials['username']}@{credentials['ip']}")
+        handle_ssh(session)
+    elif protocol == 'telnet':
+        session = pexpect.spawn(f"telnet {credentials['ip']}")
+        handle_telnet(session)
+    else:
+        print("Invalid protocol specified. Use 'ssh' or 'telnet'.")
+        return
+
+    # Apply ACL & IPSec configurations after SSH/Telnet setup
+    configure_acls(session)
+    configure_ipsec(session)
+   
+    session.sendline('exit')
+    session.close()
+
+if __name__ == "__main__":
+    main()
